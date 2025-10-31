@@ -4,58 +4,52 @@ import plotly.figure_factory as ff
 import pandas as pd
 import json
 from datetime import datetime
-import psycopg2
-from psycopg2.extras import RealDictCursor
 import os
+from supabase import create_client, Client
 
 # Initialize Dash app
 app = dash.Dash(__name__, suppress_callback_exceptions=True)
-server = app.server  # Required for Render
+server = app.server
 
-def get_db_connection():
-    """Connect to Supabase PostgreSQL"""
-    database_url = os.environ.get('DATABASE_URL')
-    return psycopg2.connect(database_url, sslmode='require')
+# Initialize Supabase client
+supabase_url = os.environ.get('SUPABASE_URL')
+supabase_key = os.environ.get('SUPABASE_KEY')
+supabase: Client = create_client(supabase_url, supabase_key)
 
 def save_state_to_db(user_id, project_id, tasks):
-    """Save gantt state to database"""
-    conn = get_db_connection()
-    cur = conn.cursor()
-    
-    state_json = json.dumps(tasks)
-    now = datetime.now()
-    
-    cur.execute('''
-        INSERT INTO gantt_states (user_id, project_id, state_data, created_at, updated_at)
-        VALUES (%s, %s, %s, %s, %s)
-        ON CONFLICT (user_id, project_id) 
-        DO UPDATE SET state_data = %s, updated_at = %s
-    ''', (user_id, project_id, state_json, now, now, state_json, now))
-    
-    conn.commit()
-    cur.close()
-    conn.close()
-    return True
+    """Save gantt state to Supabase via REST API"""
+    try:
+        state_json = json.dumps(tasks)
+        now = datetime.now().isoformat()
+        
+        data = {
+            'user_id': user_id,
+            'project_id': project_id,
+            'state_data': state_json,
+            'updated_at': now
+        }
+        
+        # Upsert (insert or update)
+        supabase.table('gantt_states').upsert(data, on_conflict='user_id,project_id').execute()
+        return True
+    except Exception as e:
+        print(f"Error saving to Supabase: {e}")
+        return False
 
 def load_state_from_db(user_id, project_id):
-    """Load gantt state from database"""
+    """Load gantt state from Supabase via REST API"""
     try:
-        conn = get_db_connection()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        response = supabase.table('gantt_states')\
+            .select('state_data')\
+            .eq('user_id', user_id)\
+            .eq('project_id', project_id)\
+            .execute()
         
-        cur.execute('''
-            SELECT state_data, updated_at FROM gantt_states 
-            WHERE user_id = %s AND project_id = %s
-        ''', (user_id, project_id))
-        
-        result = cur.fetchone()
-        cur.close()
-        conn.close()
-        
-        if result:
-            return json.loads(result['state_data'])
+        if response.data and len(response.data) > 0:
+            return json.loads(response.data[0]['state_data'])
         return None
-    except:
+    except Exception as e:
+        print(f"Error loading from Supabase: {e}")
         return None
 
 USER_ID = "default_user"
@@ -95,7 +89,7 @@ def create_gantt_figure(tasks):
 app.layout = html.Div([
     html.Div([
         html.H1("📊 Interactive Gantt Chart", style={'display': 'inline-block', 'marginRight': '20px'}),
-        html.Span("🟢 Connected to Cloud Database", style={'color': 'green', 'fontWeight': 'bold'})
+        html.Span("🟢 Connected to Supabase", style={'color': 'green', 'fontWeight': 'bold'})
     ], style={'backgroundColor': '#f5f5f5', 'padding': '20px', 'marginBottom': '20px'}),
     
     dcc.Store(id='gantt-store', storage_type='local'),
